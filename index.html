@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Flappy Bird</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html, body {
+    margin: 0; height: 100%; background: #70c5ce; overflow: hidden;
+    touch-action: manipulation; -webkit-user-select: none; user-select: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(function () {
+  // ---------- Telegram ----------
+  var tg = window.Telegram && window.Telegram.WebApp;
+  if (tg) {
+    try {
+      tg.ready();
+      tg.expand();
+      if (tg.disableVerticalSwipes) tg.disableVerticalSwipes(); // чтобы свайп не закрывал игру
+    } catch (e) {}
+  }
+  function haptic(type) {
+    try { tg.HapticFeedback.impactOccurred(type); } catch (e) {}
+  }
+
+  // ---------- Холст ----------
+  var W = 360, H = 640;
+  var canvas = document.getElementById('game');
+  var ctx = canvas.getContext('2d');
+  var scale = 1;
+
+  function resize() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    scale = Math.min(vw / W, vh / H);
+    var dpr = window.devicePixelRatio || 1;
+    canvas.style.width = (W * scale) + 'px';
+    canvas.style.height = (H * scale) + 'px';
+    canvas.width = Math.round(W * scale * dpr);
+    canvas.height = Math.round(H * scale * dpr);
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Параметры игры ----------
+  var GROUND_H = 80;
+  var GRAVITY = 1500;       // px/s^2
+  var FLAP_V = -430;        // px/s
+  var PIPE_SPEED = 130;     // px/s
+  var PIPE_W = 60;
+  var PIPE_GAP = 160;
+  var PIPE_SPACING = 210;   // расстояние между трубами по X
+  var BIRD_X = 90;
+  var BIRD_R = 13;
+
+  var state = 'ready';      // ready | playing | dead
+  var bird, pipes, score, groundX, deadTime, clouds;
+  var best = 0;
+  try { best = parseInt(localStorage.getItem('flappy_best') || '0', 10) || 0; } catch (e) {}
+
+  function reset() {
+    bird = { y: H / 2 - 40, vy: 0, rot: 0 };
+    pipes = [];
+    score = 0;
+    groundX = 0;
+    clouds = [];
+    for (var i = 0; i < 4; i++) {
+      clouds.push({ x: Math.random() * W, y: 40 + Math.random() * 200, s: 0.6 + Math.random() * 0.8 });
+    }
+    state = 'ready';
+  }
+
+  function addPipe(x) {
+    var min = 90, max = H - GROUND_H - PIPE_GAP - 90;
+    pipes.push({ x: x, gapY: min + Math.random() * (max - min), passed: false });
+  }
+
+  function flap() {
+    if (state === 'ready') {
+      state = 'playing';
+      addPipe(W + 40);
+    }
+    if (state === 'playing') {
+      bird.vy = FLAP_V;
+      haptic('light');
+    } else if (state === 'dead' && performance.now() - deadTime > 500) {
+      reset();
+    }
+  }
+
+  function die() {
+    state = 'dead';
+    deadTime = performance.now();
+    haptic('heavy');
+    if (score > best) {
+      best = score;
+      try { localStorage.setItem('flappy_best', String(best)); } catch (e) {}
+    }
+  }
+
+  // ---------- Ввод ----------
+  canvas.addEventListener('pointerdown', function (e) { e.preventDefault(); flap(); });
+  window.addEventListener('keydown', function (e) {
+    if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); flap(); }
+  });
+
+  // ---------- Логика ----------
+  function circleHitsRect(cx, cy, r, rx, ry, rw, rh) {
+    var nx = Math.max(rx, Math.min(cx, rx + rw));
+    var ny = Math.max(ry, Math.min(cy, ry + rh));
+    var dx = cx - nx, dy = cy - ny;
+    return dx * dx + dy * dy < r * r;
+  }
+
+  function update(dt) {
+    // облака
+    clouds.forEach(function (c) {
+      c.x -= 10 * c.s * dt;
+      if (c.x < -80) { c.x = W + 20; c.y = 40 + Math.random() * 200; }
+    });
+
+    if (state === 'ready') {
+      bird.y = H / 2 - 40 + Math.sin(performance.now() / 200) * 8;
+      groundX = (groundX - PIPE_SPEED * dt) % 24;
+      return;
+    }
+
+    if (state === 'playing') {
+      groundX = (groundX - PIPE_SPEED * dt) % 24;
+      bird.vy += GRAVITY * dt;
+      bird.y += bird.vy * dt;
+
+      // трубы
+      pipes.forEach(function (p) { p.x -= PIPE_SPEED * dt; });
+      var last = pipes[pipes.length - 1];
+      if (last && last.x < W - PIPE_SPACING + PIPE_W) addPipe(last.x + PIPE_SPACING);
+      pipes = pipes.filter(function (p) { return p.x + PIPE_W > -10; });
+
+      // очки и столкновения
+      for (var i = 0; i < pipes.length; i++) {
+        var p = pipes[i];
+        if (!p.passed && p.x + PIPE_W < BIRD_X - BIRD_R) {
+          p.passed = true;
+          score++;
+          haptic('soft');
+        }
+        if (circleHitsRect(BIRD_X, bird.y, BIRD_R - 1, p.x, 0, PIPE_W, p.gapY) ||
+            circleHitsRect(BIRD_X, bird.y, BIRD_R - 1, p.x, p.gapY + PIPE_GAP, PIPE_W, H)) {
+          die();
+        }
+      }
+      if (bird.y + BIRD_R >= H - GROUND_H) { bird.y = H - GROUND_H - BIRD_R; die(); }
+      if (bird.y - BIRD_R < 0) { bird.y = BIRD_R; bird.vy = 0; }
+    } else if (state === 'dead') {
+      // птица падает на землю
+      bird.vy += GRAVITY * dt;
+      bird.y = Math.min(bird.y + bird.vy * dt, H - GROUND_H - BIRD_R);
+    }
+
+    bird.rot = Math.max(-0.5, Math.min(1.3, bird.vy / 500));
+  }
+
+  // ---------- Отрисовка ----------
+  function drawCloud(c) {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 18 * c.s, 0, Math.PI * 2);
+    ctx.arc(c.x + 20 * c.s, c.y - 8 * c.s, 22 * c.s, 0, Math.PI * 2);
+    ctx.arc(c.x + 44 * c.s, c.y, 17 * c.s, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function drawPipe(p) {
+    var capH = 24, capExtra = 4;
+    ctx.fillStyle = '#5ec23a';
+    ctx.strokeStyle = '#2f6f1a';
+    ctx.lineWidth = 2;
+    // верхняя
+    ctx.fillRect(p.x, 0, PIPE_W, p.gapY);
+    ctx.strokeRect(p.x, -2, PIPE_W, p.gapY + 2);
+    ctx.fillRect(p.x - capExtra, p.gapY - capH, PIPE_W + capExtra * 2, capH);
+    ctx.strokeRect(p.x - capExtra, p.gapY - capH, PIPE_W + capExtra * 2, capH);
+    // нижняя
+    var by = p.gapY + PIPE_GAP;
+    ctx.fillRect(p.x, by, PIPE_W, H - by);
+    ctx.strokeRect(p.x, by, PIPE_W, H - by);
+    ctx.fillRect(p.x - capExtra, by, PIPE_W + capExtra * 2, capH);
+    ctx.strokeRect(p.x - capExtra, by, PIPE_W + capExtra * 2, capH);
+    // блик
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fillRect(p.x + 8, 0, 8, p.gapY - capH);
+    ctx.fillRect(p.x + 8, by + capH, 8, H - by);
+  }
+
+  function drawBird() {
+    ctx.save();
+    ctx.translate(BIRD_X, bird.y);
+    ctx.rotate(bird.rot);
+    // тело
+    ctx.fillStyle = '#f7d51d';
+    ctx.strokeStyle = '#8a6d00';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, BIRD_R + 3, BIRD_R, 0, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    // крыло
+    var flapAnim = state === 'dead' ? 0 : Math.sin(performance.now() / 70) * 4;
+    ctx.fillStyle = '#f0b800';
+    ctx.beginPath();
+    ctx.ellipse(-4, 3 + flapAnim * 0.3, 8, 5, 0, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    // глаз
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(7, -5, 5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(8.5, -5, 2, 0, Math.PI * 2); ctx.fill();
+    // клюв
+    ctx.fillStyle = '#f26b1d';
+    ctx.beginPath();
+    ctx.moveTo(12, 0); ctx.lineTo(23, 3); ctx.lineTo(12, 7); ctx.closePath();
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawGround() {
+    var y = H - GROUND_H;
+    ctx.fillStyle = '#ded895';
+    ctx.fillRect(0, y, W, GROUND_H);
+    ctx.fillStyle = '#73bf2e';
+    ctx.fillRect(0, y, W, 14);
+    ctx.fillStyle = '#5a9e22';
+    for (var x = groundX - 24; x < W + 24; x += 24) {
+      ctx.beginPath();
+      ctx.moveTo(x, y + 14); ctx.lineTo(x + 12, y); ctx.lineTo(x + 24, y + 14);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = '#c9b86a';
+    ctx.fillRect(0, y + 14, W, 3);
+  }
+
+  function text(str, x, y, size, color, align) {
+    ctx.font = 'bold ' + size + 'px "Trebuchet MS", Arial, sans-serif';
+    ctx.textAlign = align || 'center';
+    ctx.lineWidth = Math.max(3, size / 7);
+    ctx.strokeStyle = '#222';
+    ctx.lineJoin = 'round';
+    ctx.strokeText(str, x, y);
+    ctx.fillStyle = color || '#fff';
+    ctx.fillText(str, x, y);
+  }
+
+  function draw() {
+    // небо
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#4ec0ca');
+    g.addColorStop(1, '#bfe9ef');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    clouds.forEach(drawCloud);
+    pipes.forEach(drawPipe);
+    drawGround();
+    drawBird();
+
+    if (state === 'playing') {
+      text(String(score), W / 2, 90, 52);
+    } else if (state === 'ready') {
+      text('Flappy Bird', W / 2, 150, 42, '#ffd84a');
+      text('Нажми, чтобы взлететь', W / 2, 400, 22);
+      text('Рекорд: ' + best, W / 2, 440, 20, '#ffd84a');
+    } else if (state === 'dead') {
+      // панель
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#ded895';
+      ctx.strokeStyle = '#7a6a2a';
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      ctx.roundRect ? ctx.roundRect(50, 200, W - 100, 190, 14) : ctx.rect(50, 200, W - 100, 190);
+      ctx.fill(); ctx.stroke();
+      text('Игра окончена', W / 2, 180, 34, '#ff6a4a');
+      text('Счёт: ' + score, W / 2, 275, 30);
+      text('Рекорд: ' + best, W / 2, 325, 26, '#ffd84a');
+      if (performance.now() - deadTime > 500) {
+        text('Нажми, чтобы повторить', W / 2, 365, 18);
+      }
+    }
+  }
+
+  // ---------- Главный цикл ----------
+  var lastT = performance.now();
+  function loop(t) {
+    var dt = Math.min((t - lastT) / 1000, 0.033);
+    lastT = t;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
